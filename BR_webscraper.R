@@ -58,4 +58,4 @@ for(i in 1:pages) {
   Sys.sleep(2)
   
 }
-write.csv(all_articles, paste("~/R data/br_keyword_", keyword, ".csv", sep=""))
+write.csv(all_articles, paste("br_keyword_", keyword, "_", date(), "_", ".csv", sep=""))
