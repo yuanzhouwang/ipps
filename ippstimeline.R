@@ -5,7 +5,8 @@ library(httr2)
 library(chromote)
 library(stringi)
 library(stringr)
-
+library(readr)
+library(purrr)
 
 df <- read.csv("br_keyword_ipps.csv")
 
@@ -17,6 +18,10 @@ df <- read.csv("br_keyword_ipps.csv")
 
 # install.packages(c("chromote", "xml2", "rvest"))
 # install.packages(c("chromote", "xml2", "rvest"))  # if needed
+
+# ---------------------------
+# 1) Scrape URL list for article bodies
+# ---------------------------
 
 render_then_scrape <- function(url, collapse = TRUE, timeout_sec = 12) {
   stopifnot(is.character(url), length(url) == 1)
@@ -87,34 +92,60 @@ render_then_scrape <- function(url, collapse = TRUE, timeout_sec = 12) {
 }
 
 
-# Helper function for extracting IPPs/Groups and surrounding sentence.
-# ipps - vector of IPPs
-# groups - vector of groups
-detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
-  require(dplyr); require(stringr); require(stringi)
+# ---------------------------
+# 2) Load helper CSVs
+# ---------------------------
+# ipps_csv: path to ipplist_with_aliases_newsbacked_full.csv  (has columns: ipp_code, ipp_name, aliases, ...)
+# groups_csv: path to pakistan_ipp_groups_with_aliases.csv    (has columns: Group, aliases, ...)
+load_ipps_groups_helpers <- function(ipps_csv, groups_csv) {
+  ipps  <- readr::read_csv(ipps_csv, show_col_types = FALSE)
+  grps  <- readr::read_csv(groups_csv, show_col_types = FALSE)
   
+  # Normalize column names we need
+  stopifnot("ipp_name" %in% names(ipps))
+  stopifnot("aliases"  %in% names(ipps))
+  stopifnot("Group"    %in% names(grps))
+  stopifnot("aliases"  %in% names(grps))
+  
+  # Return only what we need for matching
+  ipps_out <- ipps %>%
+    transmute(IPP = ipp_name, aliases = coalesce(aliases, ""))
+  
+  grps_out <- grps %>%
+    transmute(Group = Group, aliases = coalesce(aliases, ""))
+  
+  list(ipps = ipps_out, groups = grps_out)
+}
+
+# ---------------------------
+# 3) Core detection
+# ---------------------------
+# Works with vectors OR data frames. For data frames, it will look for canonical name
+# columns and an "aliases" column. In our CSVs, aliases are pipe-separated ("|").
+detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
   # --- helpers ---
-  trim_nz <- function(x) {
-    x <- trimws(as.character(x)); x[nzchar(x)]
-  }
+  trim_nz <- function(x) { x <- trimws(as.character(x)); x[nzchar(x)] }
   escape_lit <- function(x) stringr::str_replace_all(x, "([\\.^$|()\\[\\]{}*+?\\\\])", "\\\\\\1")
   make_pattern <- function(x) {
+    # Case-insensitive, token-safe (no letters/digits directly adjacent)
     lit <- escape_lit(x)
-    paste0("(?i)(?<![A-Za-z0-9])", lit, "(?![A-Za-z0-9])")  # case-insensitive, token-safe
+    paste0("(?i)(?<![A-Za-z0-9])", lit, "(?![A-Za-z0-9])")
   }
   
   # --- normalize IPPs input (vector OR data frame; optional aliases col) ---
   if (is.data.frame(ipps)) {
-    ipp_col <- intersect(c("IPP","Name","name","Company","company"), names(ipps))
+    # Accept common name column variants; default to first column if none match
+    ipp_col <- intersect(c("IPP","ipp","Name","name","Company","company","ipp_name"), names(ipps))
     if (length(ipp_col) == 0) ipp_col <- names(ipps)[1]
     ipp_names <- trim_nz(ipps[[ipp_col[1]]])
     
     alias_tbl <- NULL
     if ("aliases" %in% names(ipps)) {
       alias_vec <- ipps$aliases; alias_vec[is.na(alias_vec)] <- ""
-      alias_list <- strsplit(alias_vec, "\\s*;\\s*")
+      # Our helper CSVs use pipe ("|") separators
+      alias_list <- strsplit(alias_vec, "\\s*\\|\\s*")
       alias_tbl <- do.call(rbind, lapply(seq_along(ipp_names), function(i) {
-        al <- alias_list[[i]]; al <- al[nzchar(al)]
+        al <- trim_nz(alias_list[[i]])
         if (!length(al)) return(NULL)
         data.frame(entity = ipp_names[i], alias = al, stringsAsFactors = FALSE)
       }))
@@ -125,20 +156,20 @@ detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
   }
   
   ipp_tbl <- data.frame(
-    type = "IPP",
-    name = ipp_names,
+    type    = "IPP",
+    name    = ipp_names,
     pattern = vapply(ipp_names, make_pattern, FUN.VALUE = character(1)),
     stringsAsFactors = FALSE
   )
   
   if (!is.null(alias_tbl) && nrow(alias_tbl)) {
     ipp_alias_tbl <- data.frame(
-      type = "IPP",
-      name = alias_tbl$entity,
+      type    = "IPP",
+      name    = alias_tbl$entity,   # canonical entity
       pattern = vapply(alias_tbl$alias, make_pattern, FUN.VALUE = character(1)),
       stringsAsFactors = FALSE
     )
-    ipp_tbl <- bind_rows(ipp_tbl, ipp_alias_tbl)
+    ipp_tbl <- dplyr::bind_rows(ipp_tbl, ipp_alias_tbl)
   }
   
   # --- normalize Groups input (vector OR data frame) ---
@@ -146,19 +177,41 @@ detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
     grp_col <- intersect(c("Group","group","Name","name"), names(groups))
     if (length(grp_col) == 0) grp_col <- names(groups)[1]
     group_names <- trim_nz(groups[[grp_col[1]]])
+    
+    grp_alias_tbl <- NULL
+    if ("aliases" %in% names(groups)) {
+      alias_vec <- groups$aliases; alias_vec[is.na(alias_vec)] <- ""
+      alias_list <- strsplit(alias_vec, "\\s*\\|\\s*")  # pipe-separated
+      grp_alias_tbl <- do.call(rbind, lapply(seq_along(group_names), function(i) {
+        al <- trim_nz(alias_list[[i]])
+        if (!length(al)) return(NULL)
+        data.frame(entity = group_names[i], alias = al, stringsAsFactors = FALSE)
+      }))
+    }
   } else {
-    group_names <- trim_nz(groups)
+    group_names  <- trim_nz(groups)
+    grp_alias_tbl <- NULL
   }
   
   grp_tbl <- data.frame(
-    type = "Group",
-    name = group_names,
+    type    = "Group",
+    name    = group_names,
     pattern = vapply(group_names, make_pattern, FUN.VALUE = character(1)),
     stringsAsFactors = FALSE
   )
   
+  if (!is.null(grp_alias_tbl) && nrow(grp_alias_tbl)) {
+    grp_aliases <- data.frame(
+      type    = "Group",
+      name    = grp_alias_tbl$entity,  # canonical entity
+      pattern = vapply(grp_alias_tbl$alias, make_pattern, FUN.VALUE = character(1)),
+      stringsAsFactors = FALSE
+    )
+    grp_tbl <- dplyr::bind_rows(grp_tbl, grp_aliases)
+  }
+  
   # --- combined dictionary (longest names first) ---
-  dict_tbl <- bind_rows(ipp_tbl, grp_tbl) %>%
+  dict_tbl <- dplyr::bind_rows(ipp_tbl, grp_tbl) %>%
     distinct(type, name, pattern) %>%
     arrange(desc(nchar(name)))
   
@@ -166,11 +219,13 @@ detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
   sentences <- stringi::stri_split_boundaries(text, type = "sentence")[[1]]
   sentences <- trim_nz(sentences)
   if (!length(sentences)) {
-    return(data.frame(url = character(), type = character(), entity = character(),
-                      sentence = character(), stringsAsFactors = FALSE))
+    return(data.frame(
+      url = character(), type = character(), entity = character(),
+      sentence = character(), stringsAsFactors = FALSE
+    ))
   }
   
-  # --- scan every sentence; keep every hit (no deduping) ---
+  # --- scan every sentence; keep every hit (no deduping = exhaustive) ---
   hits_list <- vector("list", length(sentences))
   for (i in seq_along(sentences)) {
     s <- sentences[i]
@@ -180,16 +235,77 @@ detect_ipps_groups_all <- function(text, ipps, groups, url = NA_character_) {
     if (nrow(m)) hits_list[[i]] <- m
   }
   
-  out <- bind_rows(hits_list)
+  out <- dplyr::bind_rows(hits_list)
   if (!nrow(out)) {
-    return(data.frame(url = character(), type = character(), entity = character(),
-                      sentence = character(), stringsAsFactors = FALSE))
+    return(data.frame(
+      url = character(), type = character(), entity = character(),
+      sentence = character(), stringsAsFactors = FALSE
+    ))
   }
   
   as.data.frame(out, stringsAsFactors = FALSE)
 }
 
-####### How to check various versions of IPP/Group names? Maybe ask ChatGPT.ß
-ipps <- read.csv("ipplist.csv")
-groups <- read.csv("pakistan_ipp_groups.csv")
+# -----------------------------------------
+# 4) Convenience: scan a whole articles table
+# -----------------------------------------
+# articles_df: a data frame of articles with at least a text column (text_col)
+#              and optionally a URL/id column (url_col). If url_col is missing,
+#              the row number will be used.
+# ipps_csv, groups_csv: paths to your helper CSVs from earlier steps.
+scan_articles_for_ipps_groups <- function(articles_df,
+                                          text_col = "text",
+                                          url_col  = NULL,
+                                          ipps_csv,
+                                          groups_csv) {
+  helpers <- load_ipps_groups_helpers(ipps_csv, groups_csv)
+  ipps_df <- helpers$ipps
+  grps_df <- helpers$groups
+  
+  stopifnot(text_col %in% names(articles_df))
+  use_url <- if (is.null(url_col) || !(url_col %in% names(articles_df))) FALSE else TRUE
+  
+  results <- purrr::imap_dfr(articles_df[[text_col]], function(txt, idx) {
+    if (!is.character(txt) || !nzchar(txt)) return(NULL)
+    this_url <- if (use_url) articles_df[[url_col]][idx] else paste0("article_", idx)
+    detect_ipps_groups_all(text = txt, ipps = ipps_df, groups = grps_df, url = this_url)
+  })
+  
+  # Order nicely
+  if (nrow(results)) {
+    results <- results %>% select(url, type, entity, sentence)
+  }
+  results
+}
 
+
+
+# ---------------------------
+# Test: Article Processing
+# ---------------------------
+
+ipps_csv   <- "ipplist_with_aliases_newsbacked_full.csv"
+groups_csv <- "pakistan_ipp_groups_with_aliases.csv"
+
+scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
+", text = temp), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
+
+articles <- data.frame(
+  url  = c("https://example.com/a1", "https://example.com/a2"),
+  text = c(
+    "HUBCO’s Thar Energy Limited (TEL) synchronized Unit 3 under CPEC. Meanwhile, Port Qasim Electric Power Company faced maintenance.",
+    "Wind additions in the Gharo–Jhimpir Wind Corridor continue, including projects like FWEL I and FWEL II by Fauji Foundation."
+  ),
+  stringsAsFactors = FALSE
+)
+
+hits <- scan_articles_for_ipps_groups(
+  articles_df = articles,
+  text_col    = "text",
+  url_col     = "url",
+  ipps_csv    = ipps_csv,
+  groups_csv  = groups_csv
+)
+
+print(hits)
+#> Each row = (article URL, whether IPP or Group, canonical entity, surrounding sentence)
