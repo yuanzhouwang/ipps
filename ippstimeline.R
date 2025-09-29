@@ -23,9 +23,9 @@ ua_opera_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (K
 # ---------------------------
 
 # Set filepath to Opera
-Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
+# Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
 # Set filepath to Safari
-# Sys.setenv(CHROMOTE_CHROME = "")
+Sys.setenv(CHROMOTE_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 
 # ---------------------------
@@ -38,6 +38,7 @@ render_then_scrape <- function(url, ua_chosen, collapse = TRUE, timeout_sec = 12
   # Create a browser session
   b <- ChromoteSession$new()
   on.exit(b$close(), add = TRUE)
+  options(chromot.headless = "new")
   
   # UA: Select MacOS, Windows ; Safari, Chrome, Opera
   
@@ -292,7 +293,14 @@ scan_articles_for_ipps_groups <- function(articles_df,
 ipps_csv   <- "ipplist_with_aliases_newsbacked_full.csv"
 groups_csv <- "pakistan_ipp_groups_with_aliases.csv"
 
-article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_opera_win, collapse = TRUE, timeout_sec = 3)
+article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 15)
+
+article_text <- c()
+for (i in 1:length(df$link)) {
+  # article_text <- c(article_text, render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 12))
+  df$article_text[i] <- render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = runif(1,1,11))
+  print(i)
+}
 
 scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
 ", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
