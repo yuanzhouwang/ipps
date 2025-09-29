@@ -1,6 +1,7 @@
 library(dplyr)
 library(ggplot2)
 library(xml2)
+library(rvest)
 library(httr2)
 library(chromote)
 library(stringi)
@@ -10,34 +11,38 @@ library(purrr)
 
 df <- read.csv("br_keyword_ipps.csv")
 
-# install.packages(c("rvest", "xml2", "httr"))  # if needed
+ua_safari_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+ua_chrome_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36"
+ua_opera_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36 OPR/103.0.0.0"
 
-# install.packages(c("httr2", "xml2", "rvest"))  # if needed
+ua_chrome_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36"
+ua_opera_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36 OPR/103.0.0.0"
 
-# install.packages(c("httr2", "xml2", "rvest"))  # if needed
+# ---------------------------
+# 0) Setup Chromote with browser of choice
+# ---------------------------
 
-# install.packages(c("chromote", "xml2", "rvest"))
-# install.packages(c("chromote", "xml2", "rvest"))  # if needed
+# Set filepath to Opera
+Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
+# Set filepath to Safari
+# Sys.setenv(CHROMOTE_CHROME = "")
+
 
 # ---------------------------
 # 1) Scrape URL list for article bodies
 # ---------------------------
 
-render_then_scrape <- function(url, collapse = TRUE, timeout_sec = 12) {
+render_then_scrape <- function(url, ua_chosen, collapse = TRUE, timeout_sec = 12) {
   stopifnot(is.character(url), length(url) == 1)
-  
-  library(chromote)
-  library(xml2)
-  library(rvest)
   
   # Create a browser session
   b <- ChromoteSession$new()
   on.exit(b$close(), add = TRUE)
   
-  # Optional: look more like Safari (some sites care about UA)
-  ua_safari <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
+  # UA: Select MacOS, Windows ; Safari, Chrome, Opera
+  
   b$Network$enable()
-  b$Network$setUserAgentOverride(userAgent = ua_safari)
+  b$Network$setUserAgentOverride(userAgent = ua_chosen)
   b$Page$enable()
   
   # Navigate and wait for load event
@@ -287,8 +292,10 @@ scan_articles_for_ipps_groups <- function(articles_df,
 ipps_csv   <- "ipplist_with_aliases_newsbacked_full.csv"
 groups_csv <- "pakistan_ipp_groups_with_aliases.csv"
 
+article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_opera_win, collapse = TRUE, timeout_sec = 3)
+
 scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
-", text = temp), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
+", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
 
 articles <- data.frame(
   url  = c("https://example.com/a1", "https://example.com/a2"),
