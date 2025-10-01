@@ -32,96 +32,85 @@ Sys.setenv(CHROMOTE_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Goo
 # 1) Scrape URL list for article bodies
 # ---------------------------
 
-render_then_scrape <- function(url, ua_chosen, collapse = TRUE, timeout_sec = 12) {
-  stopifnot(is.character(url), length(url) == 1)
+library(chromote)
+library(xml2)
+library(rvest)
+
+scrape_brecorder_mac_safari <- function(urls, timeout_sec = 15) {
+  stopifnot(is.character(urls), length(urls) >= 1)
+  if (length(urls) == 1) urls <- as.character(urls)
   
-  # Create a browser session
-  b <- ChromoteSession$new()
-  on.exit(b$close(), add = TRUE)
-  options(chromot.headless = "new")
+  required_pkgs <- c("RSelenium", "xml2", "rvest")
+  to_install <- setdiff(required_pkgs, rownames(installed.packages()))
+  if (length(to_install)) install.packages(to_install, quiet = TRUE)
   
-  # UA: Select MacOS, Windows ; Safari, Chrome, Opera
+  # Start/ensure safaridriver on port 4444
+  # If it's already running, this is a no-op
+  sf_proc <- NULL
+  try({
+    # Try to connect first; if fails, launch safaridriver
+    con_test <- try(socketConnection("127.0.0.1", 4444, open = "r+", blocking = TRUE, timeout = 1), silent = TRUE)
+    if (inherits(con_test, "try-error")) {
+      sf_proc <- sys::exec_background("safaridriver", c("-p", "4444"))
+      Sys.sleep(0.6)  # give it a moment
+    } else close(con_test)
+  }, silent = TRUE)
   
-  b$Network$enable()
-  b$Network$setUserAgentOverride(userAgent = ua_chosen)
-  b$Page$enable()
-  
-  # Navigate and wait for load event
-  b$Page$navigate(url)
-  b$Page$loadEventFired()
+  # Connect RSelenium to local Safari
+  rD <- RSelenium::remoteDriver(
+    remoteServerAddr = "127.0.0.1",
+    port = 4444,
+    browserName = "safari"
+  )
+  rD$open(silent = TRUE)
+  on.exit({
+    try(rD$close(), silent = TRUE)
+    if (!is.null(sf_proc)) try(tools::pskill(sf_proc), silent = TRUE)
+  }, add = TRUE)
   
   # Helper: wait until the target selector appears (or timeout)
-  wait_for_selector <- function(css, timeout_sec = 10, poll = 0.25) {
+  wait_for_selector <- function(css, timeout = timeout_sec, poll = 0.25) {
     t0 <- Sys.time()
     repeat {
-      doc <- b$DOM$getDocument()
-      q <- b$DOM$querySelectorAll(nodeId = doc$root$nodeId, selector = css)
-      if (length(q$nodeIds) > 0) return(invisible(TRUE))
-      if (as.numeric(difftime(Sys.time(), t0, units = "secs")) > timeout_sec) break
+      present <- try({
+        elems <- rD$findElements("css selector", css)
+        length(elems) > 0
+      }, silent = TRUE)
+      if (!inherits(present, "try-error") && isTRUE(present)) return(TRUE)
+      if (as.numeric(difftime(Sys.time(), t0, units = "secs")) > timeout) return(FALSE)
       Sys.sleep(poll)
     }
-    invisible(FALSE)
   }
   
-  container_sel <- "div.story__content.overflow-hidden.pt-2.mt-2"
-  paras_sel <- paste0(container_sel, " p")
-  wait_for_selector(paras_sel, timeout_sec = timeout_sec)
-  
-  # Grab the full outer HTML of the document
-  doc <- b$DOM$getDocument()
-  html <- b$DOM$getOuterHTML(nodeId = doc$root$nodeId)$outerHTML
-  if (!nzchar(html)) {
-    warning("Got empty HTML from the rendered page.")
-    return(NA_character_)
+  scrape_one <- function(u) {
+    # Navigate
+    rD$navigate(u)
+    ok <- wait_for_selector("div.story__content.overflow-hidden.pt-2.mt-2 p", timeout_sec)
+    if (!ok) return(NA_character_)
+    
+    # Get page source and parse
+    html <- rD$getPageSource()[[1]]
+    h <- xml2::read_html(html)
+    
+    paras_sel <- "div.story__content.overflow-hidden.pt-2.mt-2 p"
+    paragraphs <- rvest::html_elements(h, paras_sel)
+    if (length(paragraphs) == 0) return(character())
+    
+    p_texts <- vapply(paragraphs, function(p) {
+      nodes <- xml2::xml_find_all(p, ".//text()[not(ancestor::a)]")
+      txt <- paste0(xml2::xml_text(nodes), collapse = "")
+      txt <- gsub("[\\h\\v]+", " ", txt, perl = TRUE)
+      trimws(txt)
+    }, FUN.VALUE = character(1))
+    
+    p_texts <- p_texts[nzchar(p_texts)]
+    if (!length(p_texts)) return(character())
+    paste(p_texts, collapse = "\n\n")
   }
   
-  # Parse and extract paragraphs, excluding link text within <a> tags
-  h <- read_html(html)
-  paragraphs <- html_elements(h, paras_sel)
-  if (length(paragraphs) == 0) {
-    warning("No matching paragraphs found under the specified container.")
-    return(character())
-  }
-  
-  p_texts <- vapply(paragraphs, function(p) {
-    nodes <- xml_find_all(p, ".//text()[not(ancestor::a)]")
-    txt <- paste0(xml_text(nodes), collapse = "")
-    txt <- gsub("[\\h\\v]+", " ", txt, perl = TRUE)  # \h = horizontal ws (incl. NBSP), \v = vertical ws
-    txt <- trimws(txt)
-    trimws(txt)
-  }, FUN.VALUE = character(1))
-  
-  p_texts <- p_texts[nzchar(p_texts)]
-  if (!length(p_texts)) return(character())
-  
-  if (isTRUE(collapse)) paste(p_texts, collapse = "\n\n") else p_texts
+  vapply(urls, scrape_one, FUN.VALUE = character(1))
 }
 
-
-# ---------------------------
-# 2) Load helper CSVs
-# ---------------------------
-# ipps_csv: path to ipplist_with_aliases_newsbacked_full.csv  (has columns: ipp_code, ipp_name, aliases, ...)
-# groups_csv: path to pakistan_ipp_groups_with_aliases.csv    (has columns: Group, aliases, ...)
-load_ipps_groups_helpers <- function(ipps_csv, groups_csv) {
-  ipps  <- readr::read_csv(ipps_csv, show_col_types = FALSE)
-  grps  <- readr::read_csv(groups_csv, show_col_types = FALSE)
-  
-  # Normalize column names we need
-  stopifnot("ipp_name" %in% names(ipps))
-  stopifnot("aliases"  %in% names(ipps))
-  stopifnot("Group"    %in% names(grps))
-  stopifnot("aliases"  %in% names(grps))
-  
-  # Return only what we need for matching
-  ipps_out <- ipps %>%
-    transmute(IPP = ipp_name, aliases = coalesce(aliases, ""))
-  
-  grps_out <- grps %>%
-    transmute(Group = Group, aliases = coalesce(aliases, ""))
-  
-  list(ipps = ipps_out, groups = grps_out)
-}
 
 # ---------------------------
 # 3) Core detection
@@ -298,9 +287,10 @@ article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_safari_mac, c
 article_text <- c()
 for (i in 1:length(df$link)) {
   # article_text <- c(article_text, render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 12))
-  df$article_text[i] <- render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = runif(1,1,11))
   print(i)
 }
+
+df$article_text <- scrape_brecorder_mac_safari(urls = df$link, timeout_sec = runif(1,1.2,7.2))
 
 scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
 ", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
