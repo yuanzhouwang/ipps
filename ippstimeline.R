@@ -32,83 +32,115 @@ Sys.setenv(CHROMOTE_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Goo
 # 1) Scrape URL list for article bodies
 # ---------------------------
 
-library(chromote)
-library(xml2)
+# install.packages(c("httr2","rvest","stringr","purrr","tibble"))
+library(httr2)
 library(rvest)
+library(stringr)
+library(purrr)
+library(tibble)
 
-scrape_brecorder_mac_safari <- function(urls, timeout_sec = 15) {
-  stopifnot(is.character(urls), length(urls) >= 1)
-  if (length(urls) == 1) urls <- as.character(urls)
+# --- Helpers ---
+brec_safari_ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+
+to_brec_amp <- function(url) {
+  # Accept either .../news/<id>/<slug> or .../news/<id>
+  m <- regexec("^https?://www\\.brecorder\\.com/news/([0-9]+)/?", url)
+  g <- regmatches(url, m)
+  if (length(g) && length(g[[1]]) >= 2) {
+    id <- g[[1]][2]
+    paste0("https://www.brecorder.com/news/amp/", id)
+  } else {
+    # If it already looks like an AMP link, keep it; otherwise return NA
+    if (grepl("^https?://www\\.brecorder\\.com/news/amp/[0-9]+/?$", url)) url else NA_character_
+  }
+}
+
+fetch_amp_html <- function(amp_url) {
+  req <- request(amp_url) |>
+    req_user_agent(brec_safari_ua) |>
+    req_headers(
+      "Accept" = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language" = "en-US,en;q=0.9",
+      "Upgrade-Insecure-Requests" = "1",
+      "DNT" = "1",
+      "Referer" = "https://www.brecorder.com/"
+    ) |>
+    # Avoid brotli: some R setups don't have it in libcurl
+    req_options(accept_encoding = "gzip, deflate") |>
+    req_timeout(20) |>
+    req_retry(
+      max_tries = 3,
+      backoff = ~ min(30, 1.6 ^ .attempt * runif(1, 0.8, 1.25)),
+      is_transient = function(resp) {
+        if (inherits(resp, "error")) return(TRUE)
+        s <- resp_status(resp); s >= 500 || s == 429
+      }
+    )
   
-  required_pkgs <- c("RSelenium", "xml2", "rvest")
-  to_install <- setdiff(required_pkgs, rownames(installed.packages()))
-  if (length(to_install)) install.packages(to_install, quiet = TRUE)
-  
-  # Start/ensure safaridriver on port 4444
-  # If it's already running, this is a no-op
-  sf_proc <- NULL
-  try({
-    # Try to connect first; if fails, launch safaridriver
-    con_test <- try(socketConnection("127.0.0.1", 4444, open = "r+", blocking = TRUE, timeout = 1), silent = TRUE)
-    if (inherits(con_test, "try-error")) {
-      sf_proc <- sys::exec_background("safaridriver", c("-p", "4444"))
-      Sys.sleep(0.6)  # give it a moment
-    } else close(con_test)
-  }, silent = TRUE)
-  
-  # Connect RSelenium to local Safari
-  rD <- RSelenium::remoteDriver(
-    remoteServerAddr = "127.0.0.1",
-    port = 4444,
-    browserName = "safari"
-  )
-  rD$open(silent = TRUE)
-  on.exit({
-    try(rD$close(), silent = TRUE)
-    if (!is.null(sf_proc)) try(tools::pskill(sf_proc), silent = TRUE)
-  }, add = TRUE)
-  
-  # Helper: wait until the target selector appears (or timeout)
-  wait_for_selector <- function(css, timeout = timeout_sec, poll = 0.25) {
-    t0 <- Sys.time()
-    repeat {
-      present <- try({
-        elems <- rD$findElements("css selector", css)
-        length(elems) > 0
-      }, silent = TRUE)
-      if (!inherits(present, "try-error") && isTRUE(present)) return(TRUE)
-      if (as.numeric(difftime(Sys.time(), t0, units = "secs")) > timeout) return(FALSE)
-      Sys.sleep(poll)
+  resp <- req_perform(req)
+  list(status = resp_status(resp), html = resp_body_html(resp))
+}
+
+extract_brec_body <- function(html,
+                              selectors = c(
+                                "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                "div.story__content p",
+                                "article p"
+                              )) {
+  for (sel in selectors) {
+    nodes <- html |> html_elements(sel)
+    if (length(nodes)) {
+      txt <- nodes |> html_text2() |> str_squish()
+      body <- paste(txt, collapse = "\n\n")
+      if (nzchar(body)) return(list(ok = TRUE, body = body, note = NA_character_))
     }
   }
-  
-  scrape_one <- function(u) {
-    # Navigate
-    rD$navigate(u)
-    ok <- wait_for_selector("div.story__content.overflow-hidden.pt-2.mt-2 p", timeout_sec)
-    if (!ok) return(NA_character_)
-    
-    # Get page source and parse
-    html <- rD$getPageSource()[[1]]
-    h <- xml2::read_html(html)
-    
-    paras_sel <- "div.story__content.overflow-hidden.pt-2.mt-2 p"
-    paragraphs <- rvest::html_elements(h, paras_sel)
-    if (length(paragraphs) == 0) return(character())
-    
-    p_texts <- vapply(paragraphs, function(p) {
-      nodes <- xml2::xml_find_all(p, ".//text()[not(ancestor::a)]")
-      txt <- paste0(xml2::xml_text(nodes), collapse = "")
-      txt <- gsub("[\\h\\v]+", " ", txt, perl = TRUE)
-      trimws(txt)
-    }, FUN.VALUE = character(1))
-    
-    p_texts <- p_texts[nzchar(p_texts)]
-    if (!length(p_texts)) return(character())
-    paste(p_texts, collapse = "\n\n")
+  list(ok = FALSE, body = NA_character_, note = "Selector found no nodes")
+}
+
+# --- Public: single URL ---
+brec_get_article_amp <- function(url,
+                                 selector = "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                 verbose = FALSE) {
+  stopifnot(is.character(url), length(url) == 1L, !is.na(url))
+  amp <- to_brec_amp(url)
+  if (is.na(amp)) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = "Not a recognized brecorder article URL"))
   }
-  
-  vapply(urls, scrape_one, FUN.VALUE = character(1))
+  if (verbose) message("Fetching AMP: ", amp)
+  res <- try(fetch_amp_html(amp), silent = TRUE)
+  if (inherits(res, "try-error")) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = paste0("HTTP error: ", as.character(res))))
+  }
+  if (res$status == 403L) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = "HTTP 403 on AMP (blocked by site)"))
+  }
+  parsed <- extract_brec_body(res$html, selectors = c(selector, "div.story__content p", "article p"))
+  if (parsed$ok) return(list(url = url, ok = TRUE, body = parsed$body, note = "Parsed from AMP"))
+  list(url = url, ok = FALSE, body = NA_character_, note = parsed$note)
+}
+
+# --- Public: many URLs ---
+brec_scrape_articles_amp <- function(urls,
+                                     selector = "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                     min_pause = 0.5, max_pause = 1.5,
+                                     verbose = FALSE) {
+  stopifnot(is.character(urls), length(urls) >= 1L)
+  urls <- unique(urls)
+  results <- map(urls, function(u) {
+    res <- brec_get_article_amp(u, selector = selector, verbose = verbose)
+    Sys.sleep(runif(1, min_pause, max_pause))
+    res
+  })
+  tibble(
+    url   = map_chr(results, "url"),
+    ok    = map_lgl(results, "ok"),
+    body  = map_chr(results, "body"),
+    note  = map_chr(results, "note")
+  )
 }
 
 
@@ -290,7 +322,7 @@ for (i in 1:length(df$link)) {
   print(i)
 }
 
-df$article_text <- scrape_brecorder_mac_safari(urls = df$link, timeout_sec = runif(1,1.2,7.2))
+df$article_text <- scrape_brecorder_mac_safari(urls = df$link[1], timeout_sec = runif(1,1.2,7.2))
 
 scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
 ", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
