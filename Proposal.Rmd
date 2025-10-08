@@ -35,7 +35,7 @@ $$
 is the probability that any actual renegotiation event is reported. $\delta_i$ are again IPP level fixed-effects, which here represent the visibility of a specific IPP. $Z_i(t)$ are determinants of the likelihood of reporting renegotiation events. Included in $Z_i(t)$ should also be determinants that do not affect $\lambda_i(t)$:
 
 - News congestion, measured by the inverse of the number of articles published after 9:30 PM (PKT), which is rare and could be a good measure of how busy a certain day's news cycle is--busier days should reduce the probability that a renegotiation will be reported. This can be tailored to specifically the energy desk.
-- PSX/SECP filing load, measured by the number of PSX announcements or SECP filings by non-IPP firms, which can be scraped from publicly available sources [where?]
+- PSX/SECP filing load, measured by the number of PSX announcements or SECP filings by non-IPP firms, which can be scraped from publicly available sources.
 - Operational shocks, which we still need to determine.
 
 ### Assumptions
