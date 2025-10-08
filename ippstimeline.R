@@ -23,104 +23,126 @@ ua_opera_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (K
 # ---------------------------
 
 # Set filepath to Opera
-Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
+# Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
 # Set filepath to Safari
-# Sys.setenv(CHROMOTE_CHROME = "")
+Sys.setenv(CHROMOTE_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
 
 
 # ---------------------------
 # 1) Scrape URL list for article bodies
 # ---------------------------
 
-render_then_scrape <- function(url, ua_chosen, collapse = TRUE, timeout_sec = 12) {
-  stopifnot(is.character(url), length(url) == 1)
+# install.packages(c("httr2","rvest","stringr","purrr","tibble"))
+library(httr2)
+library(rvest)
+library(stringr)
+library(purrr)
+library(tibble)
+
+# --- Helpers ---
+brec_safari_ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+
+to_brec_amp <- function(url) {
+  # Accept either .../news/<id>/<slug> or .../news/<id>
+  m <- regexec("^https?://www\\.brecorder\\.com/news/([0-9]+)/?", url)
+  g <- regmatches(url, m)
+  if (length(g) && length(g[[1]]) >= 2) {
+    id <- g[[1]][2]
+    paste0("https://www.brecorder.com/news/amp/", id)
+  } else {
+    # If it already looks like an AMP link, keep it; otherwise return NA
+    if (grepl("^https?://www\\.brecorder\\.com/news/amp/[0-9]+/?$", url)) url else NA_character_
+  }
+}
+
+fetch_amp_html <- function(amp_url) {
+  req <- request(amp_url) |>
+    req_user_agent(brec_safari_ua) |>
+    req_headers(
+      "Accept" = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      "Accept-Language" = "en-US,en;q=0.9",
+      "Upgrade-Insecure-Requests" = "1",
+      "DNT" = "1",
+      "Referer" = "https://www.brecorder.com/"
+    ) |>
+    # Avoid brotli: some R setups don't have it in libcurl
+    req_options(accept_encoding = "gzip, deflate") |>
+    req_timeout(20) |>
+    req_retry(
+      max_tries = 3,
+      backoff = ~ min(30, 1.6 ^ .attempt * runif(1, 0.8, 1.25)),
+      is_transient = function(resp) {
+        if (inherits(resp, "error")) return(TRUE)
+        s <- resp_status(resp); s >= 500 || s == 429
+      }
+    )
   
-  # Create a browser session
-  b <- ChromoteSession$new()
-  on.exit(b$close(), add = TRUE)
-  
-  # UA: Select MacOS, Windows ; Safari, Chrome, Opera
-  
-  b$Network$enable()
-  b$Network$setUserAgentOverride(userAgent = ua_chosen)
-  b$Page$enable()
-  
-  # Navigate and wait for load event
-  b$Page$navigate(url)
-  b$Page$loadEventFired()
-  
-  # Helper: wait until the target selector appears (or timeout)
-  wait_for_selector <- function(css, timeout_sec = 10, poll = 0.25) {
-    t0 <- Sys.time()
-    repeat {
-      doc <- b$DOM$getDocument()
-      q <- b$DOM$querySelectorAll(nodeId = doc$root$nodeId, selector = css)
-      if (length(q$nodeIds) > 0) return(invisible(TRUE))
-      if (as.numeric(difftime(Sys.time(), t0, units = "secs")) > timeout_sec) break
-      Sys.sleep(poll)
+  resp <- req_perform(req)
+  list(status = resp_status(resp), html = resp_body_html(resp))
+}
+
+extract_brec_body <- function(html,
+                              selectors = c(
+                                "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                "div.story__content p",
+                                "article p"
+                              )) {
+  for (sel in selectors) {
+    nodes <- html |> html_elements(sel)
+    if (length(nodes)) {
+      txt <- nodes |> html_text2() |> str_squish()
+      body <- paste(txt, collapse = "\n\n")
+      if (nzchar(body)) return(list(ok = TRUE, body = body, note = NA_character_))
     }
-    invisible(FALSE)
   }
-  
-  container_sel <- "div.story__content.overflow-hidden.pt-2.mt-2"
-  paras_sel <- paste0(container_sel, " p")
-  wait_for_selector(paras_sel, timeout_sec = timeout_sec)
-  
-  # Grab the full outer HTML of the document
-  doc <- b$DOM$getDocument()
-  html <- b$DOM$getOuterHTML(nodeId = doc$root$nodeId)$outerHTML
-  if (!nzchar(html)) {
-    warning("Got empty HTML from the rendered page.")
-    return(NA_character_)
-  }
-  
-  # Parse and extract paragraphs, excluding link text within <a> tags
-  h <- read_html(html)
-  paragraphs <- html_elements(h, paras_sel)
-  if (length(paragraphs) == 0) {
-    warning("No matching paragraphs found under the specified container.")
-    return(character())
-  }
-  
-  p_texts <- vapply(paragraphs, function(p) {
-    nodes <- xml_find_all(p, ".//text()[not(ancestor::a)]")
-    txt <- paste0(xml_text(nodes), collapse = "")
-    txt <- gsub("[\\h\\v]+", " ", txt, perl = TRUE)  # \h = horizontal ws (incl. NBSP), \v = vertical ws
-    txt <- trimws(txt)
-    trimws(txt)
-  }, FUN.VALUE = character(1))
-  
-  p_texts <- p_texts[nzchar(p_texts)]
-  if (!length(p_texts)) return(character())
-  
-  if (isTRUE(collapse)) paste(p_texts, collapse = "\n\n") else p_texts
+  list(ok = FALSE, body = NA_character_, note = "Selector found no nodes")
 }
 
-
-# ---------------------------
-# 2) Load helper CSVs
-# ---------------------------
-# ipps_csv: path to ipplist_with_aliases_newsbacked_full.csv  (has columns: ipp_code, ipp_name, aliases, ...)
-# groups_csv: path to pakistan_ipp_groups_with_aliases.csv    (has columns: Group, aliases, ...)
-load_ipps_groups_helpers <- function(ipps_csv, groups_csv) {
-  ipps  <- readr::read_csv(ipps_csv, show_col_types = FALSE)
-  grps  <- readr::read_csv(groups_csv, show_col_types = FALSE)
-  
-  # Normalize column names we need
-  stopifnot("ipp_name" %in% names(ipps))
-  stopifnot("aliases"  %in% names(ipps))
-  stopifnot("Group"    %in% names(grps))
-  stopifnot("aliases"  %in% names(grps))
-  
-  # Return only what we need for matching
-  ipps_out <- ipps %>%
-    transmute(IPP = ipp_name, aliases = coalesce(aliases, ""))
-  
-  grps_out <- grps %>%
-    transmute(Group = Group, aliases = coalesce(aliases, ""))
-  
-  list(ipps = ipps_out, groups = grps_out)
+# --- Public: single URL ---
+brec_get_article_amp <- function(url,
+                                 selector = "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                 verbose = FALSE) {
+  stopifnot(is.character(url), length(url) == 1L, !is.na(url))
+  amp <- to_brec_amp(url)
+  if (is.na(amp)) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = "Not a recognized brecorder article URL"))
+  }
+  if (verbose) message("Fetching AMP: ", amp)
+  res <- try(fetch_amp_html(amp), silent = TRUE)
+  if (inherits(res, "try-error")) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = paste0("HTTP error: ", as.character(res))))
+  }
+  if (res$status == 403L) {
+    return(list(url = url, ok = FALSE, body = NA_character_,
+                note = "HTTP 403 on AMP (blocked by site)"))
+  }
+  parsed <- extract_brec_body(res$html, selectors = c(selector, "div.story__content p", "article p"))
+  if (parsed$ok) return(list(url = url, ok = TRUE, body = parsed$body, note = "Parsed from AMP"))
+  list(url = url, ok = FALSE, body = NA_character_, note = parsed$note)
 }
+
+# --- Public: many URLs ---
+brec_scrape_articles_amp <- function(urls,
+                                     selector = "div.story__content.overflow-hidden.pt-2.mt-2 p",
+                                     min_pause = 0.5, max_pause = 1.5,
+                                     verbose = FALSE) {
+  stopifnot(is.character(urls), length(urls) >= 1L)
+  urls <- unique(urls)
+  results <- map(urls, function(u) {
+    res <- brec_get_article_amp(u, selector = selector, verbose = verbose)
+    Sys.sleep(runif(1, min_pause, max_pause))
+    res
+  })
+  tibble(
+    url   = map_chr(results, "url"),
+    ok    = map_lgl(results, "ok"),
+    body  = map_chr(results, "body"),
+    note  = map_chr(results, "note")
+  )
+}
+
 
 # ---------------------------
 # 3) Core detection
@@ -292,7 +314,15 @@ scan_articles_for_ipps_groups <- function(articles_df,
 ipps_csv   <- "ipplist_with_aliases_newsbacked_full.csv"
 groups_csv <- "pakistan_ipp_groups_with_aliases.csv"
 
-article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_opera_win, collapse = TRUE, timeout_sec = 3)
+article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 15)
+
+article_text <- c()
+for (i in 1:length(df$link)) {
+  # article_text <- c(article_text, render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 12))
+  print(i)
+}
+
+df$article_text <- scrape_brecorder_mac_safari(urls = df$link[1], timeout_sec = runif(1,1.2,7.2))
 
 scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
 ", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
