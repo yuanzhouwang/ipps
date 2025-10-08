@@ -1,0 +1,50 @@
+---
+title: "Proposal"
+author: "Andrew Wang & Hassan Aziz"
+date: "7 October 2025"
+output: pdf_document
+---
+
+This is a project I will work on with Hassan Aziz.
+
+Pakistan's power grid is in part fed by Independent Power Producers (IPPs), which contributes just over half of the country's power capacity. IPPs are private companies who own and operate power plants and sell it to the national grid through Purchasing Power Agreements (PPA). However, early PPAs were plagued by terms unfavorable to the government, excess capacity nonetheless paid for by the government, and circular debt. These issues led to soaring power costs, and under pressure the government began renegotiating contracts starting in 2019 ^[https://www.dawn.com/news/1874697].
+
+Many IPPs are developed, sponsored, or owned by Chinese State-Owned Enterprises. Critics of Chinese influence in Pakistan's economy have noted that these IPPs have not faced contract renegotiations at a similar rate, and indeed Chinese-Owned IPPs may not have faced renegotiations at all ^[https://www.arabnews.com/node/2605754/pakistan]. We would like to answer the question: **What is the effect of Chinese involvement in the ownership, sponsorship, or development of IPPs on the probability that the IPP faces a contract renegotiation?**
+
+### Data and Analysis
+
+I have been working on scraping news articles from Business Recorder, Pakistan's paper of record for financial and economic news. Few events, if any, regarding IPPs should be recorded by other news outlets but not by Business Recorder. Using these news articles, we will construct a dataset of reported contract renegotiations, each with the IPP involved, type of renegotiation, and date. The primary measurement concern is that not all renegotiations are recorded. I will try to address this by modeling the **observed** number of contract renegotiations as a thinned version of the **actual** number of contract renegotiations. Some determinants of the probability of reporting should not affect the probability of renegotiation itself, which should allow us to estimate the probability of reporting.
+
+### Data Generating Model:
+
+The actual number of renegotiations for IPP $i$ can be modeled by a Poisson distribution ($N_i(t) \sim \text{Pois}(\lambda_i(t))$) with rate
+$\lambda_i(t) = exp\{ \alpha_i + \beta^T X_i(t) + \beta_c \texttt{CN\_inf} \}$
+where $\alpha_i$ are some IPP-level fixed effects, $X_i(t)$ is a vector of determinants of renegotiation risk, including:
+
+- Power plant(s) characteristics: capacity, fuel type, and vintage (publicly available)
+- Financial performance: debt, revenue, public/private (publicly available, or indexed from analyst commentary)
+- Time-varying effects: dummy variables for election occurrence and economic crisis incidence, per capita income.
+
+$\texttt{CN\_inf}$ is a variable representing the influence of Chinese SOEs. This may be a factor with various categories of Chinese influence, such as outright ownership, partial shareholding, or primary role in development/financing of the power plant.
+
+The thinning process can be incorporated by modeling the observed number of renegotiations as a Poisson function ($\tilde{N}_i(t) \sim \text{Pois}(q_i(t)\lambda_i(t))$) where
+
+$$
+q_i(t) = \text{logit}^{-1}\{ \delta_i + \theta^T Z_i(t) \}
+$$
+is the probability that any actual renegotiation event is reported. $\delta_i$ are again IPP level fixed-effects, which here represent the visibility of a specific IPP. $Z_i(t)$ are determinants of the likelihood of reporting renegotiation events, such as:
+- whether there is an election cycle or economic crisis
+- ???
+
+Included in $Z_i(t)$ should also be determinants that do not affect $\lambda_i(t)$:
+- News congestion, measured by the inverse of the number of articles published after 9:30 PM (PKT), which is rare and could be a good measure of how busy a certain day's news cycle is--busier days should reduce the probability that a renegotiation will be reported. This can be tailored to specifically the energy desk.
+- PSX/SECP filing load, measured by the number of PSX announcements or SECP filings by non-IPP firms, which can be scraped from publicly available sources [where?]
+- Operational shocks?
+
+### Assumptions
+
+My model makes two key assumptions:
+
+1. The onset of conflict reduces the probability that a contract renegotiation is reported but not the probability that contract renegotiations occur. I am aware that this assumption may not be reasonable, but I need to conduct some further research on this.
+
+2. The probability of a renegotiation being reported is not heterogenous on the level of Chinese influence in the IPP facing renegotiation. If renegotiation with Chinese-influenced IPPs tend not to be reported, then the thinning model may identify an effect of Chinese influence on renegotiation when the effect of Chinese influence is actually on reporting. I do not think I can address my model's reliance on this assumption.
