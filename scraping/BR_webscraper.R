@@ -1,3 +1,4 @@
+# Run from the project root (open ipps.Rproj in RStudio).
 library(rvest)
 library(dplyr)
 library(lubridate)
@@ -23,7 +24,7 @@ scrape_articles <- function(url) {
   data <- lapply(articles, function(article) {
     title_node <- article %>% html_node("h2.story__title a.story__link")
     title <- title_node %>% html_text(trim = TRUE)
-    link <- title_node %>% html_attr("href")
+    link <- title_node %>% html_attr("href") %>% xml2::url_absolute(url)
     
     # Extract publication date from title attribute inside span.timestamp--time
     date_raw <- article %>%
@@ -58,4 +59,7 @@ for(i in 1:pages) {
   Sys.sleep(2)
   
 }
-write.csv(all_articles, paste("br_keyword_", keyword, "_", date(), "_", ".csv", sep=""))
+# Use the same filename consumed by ippstimeline.R.
+write.csv(all_articles,
+          file.path("scraping", paste0("br_keyword_", keyword, ".csv")),
+          row.names = FALSE)

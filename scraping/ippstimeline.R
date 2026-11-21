@@ -1,46 +1,20 @@
+# Run from the project root (open ipps.Rproj in RStudio).
 library(dplyr)
-library(ggplot2)
-library(xml2)
 library(rvest)
 library(httr2)
-library(chromote)
 library(stringi)
 library(stringr)
-library(readr)
 library(purrr)
+library(tibble)
 
-df <- read.csv("br_keyword_ipps.csv")
-
-ua_safari_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Safari/605.1.15"
-ua_chrome_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36"
-ua_opera_mac <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36 OPR/103.0.0.0"
-
-ua_chrome_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36"
-ua_opera_win <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/117.0.5938.132 Safari/537.36 OPR/103.0.0.0"
-
-# ---------------------------
-# 0) Setup Chromote with browser of choice
-# ---------------------------
-
-# Set filepath to Opera
-# Sys.setenv(CHROMOTE_CHROME = "C:\\Users\\Andrew\\AppData\\Local\\Programs\\Opera\\opera.exe")
-# Set filepath to Safari
-Sys.setenv(CHROMOTE_CHROME = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-
+df <- read.csv(file.path("scraping", "br_keyword_ipps.csv"))
 
 # ---------------------------
 # 1) Scrape URL list for article bodies
 # ---------------------------
 
-# install.packages(c("httr2","rvest","stringr","purrr","tibble"))
-library(httr2)
-library(rvest)
-library(stringr)
-library(purrr)
-library(tibble)
-
 # --- Helpers ---
-brec_safari_ua <- "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15"
+brec_opera_ua <- "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0"
 
 to_brec_amp <- function(url) {
   # Accept either .../news/<id>/<slug> or .../news/<id>
@@ -57,7 +31,7 @@ to_brec_amp <- function(url) {
 
 fetch_amp_html <- function(amp_url) {
   req <- request(amp_url) |>
-    req_user_agent(brec_safari_ua) |>
+    req_user_agent(brec_opera_ua) |>
     req_headers(
       "Accept" = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
       "Accept-Language" = "en-US,en;q=0.9",
@@ -285,15 +259,14 @@ scan_articles_for_ipps_groups <- function(articles_df,
                                           url_col  = NULL,
                                           ipps_csv,
                                           groups_csv) {
-  helpers <- load_ipps_groups_helpers(ipps_csv, groups_csv)
-  ipps_df <- helpers$ipps
-  grps_df <- helpers$groups
+  ipps_df <- read.csv(ipps_csv, stringsAsFactors = FALSE)
+  grps_df <- read.csv(groups_csv, stringsAsFactors = FALSE)
   
   stopifnot(text_col %in% names(articles_df))
   use_url <- if (is.null(url_col) || !(url_col %in% names(articles_df))) FALSE else TRUE
   
   results <- purrr::imap_dfr(articles_df[[text_col]], function(txt, idx) {
-    if (!is.character(txt) || !nzchar(txt)) return(NULL)
+    if (!is.character(txt) || is.na(txt) || !nzchar(txt)) return(NULL)
     this_url <- if (use_url) articles_df[[url_col]][idx] else paste0("article_", idx)
     detect_ipps_groups_all(text = txt, ipps = ipps_df, groups = grps_df, url = this_url)
   })
@@ -308,27 +281,20 @@ scan_articles_for_ipps_groups <- function(articles_df,
 
 
 # ---------------------------
-# Test: Article Processing
+# Example: Article Processing (offline)
 # ---------------------------
 
-ipps_csv   <- "ipplist_with_aliases_newsbacked_full.csv"
-groups_csv <- "pakistan_ipp_groups_with_aliases.csv"
+ipps_csv   <- file.path("scraping", "ipplist_with_aliases_newsbacked_full.csv")
+groups_csv <- file.path("scraping", "pakistan_ipp_groups_with_aliases.csv")
 
-article_text <- lapply(df$link, render_then_scrape, ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 15)
-
-article_text <- c()
-for (i in 1:length(df$link)) {
-  # article_text <- c(article_text, render_then_scrape(df$link[i], ua_chosen = ua_safari_mac, collapse = TRUE, timeout_sec = 12))
-  print(i)
-}
-
-df$article_text <- scrape_brecorder_mac_safari(urls = df$link[1], timeout_sec = runif(1,1.2,7.2))
-
-scan_articles_for_ipps_groups(articles_df = data.frame(url = "https://www.brecorder.com/news/40372487/circular-debt-debacle-financial-fixes-cannot-solve-the-problem
-", text = ), text_col = "text", url_col = "url", ipps_csv = ipps_csv, groups_csv = groups_csv)
+# To fetch real articles, run these lines interactively after sourcing this file:
+# articles <- brec_scrape_articles_amp(df$link)
+# hits <- scan_articles_for_ipps_groups(
+#   articles_df = articles, text_col = "body", url_col = "url",
+#   ipps_csv = ipps_csv, groups_csv = groups_csv)
 
 articles <- data.frame(
-  url  = c("https://example.com/a1", "https://example.com/a2"),
+  url  = c("example_1", "example_2"),  # Synthetic IDs, not source links.
   text = c(
     "HUBCO’s Thar Energy Limited (TEL) synchronized Unit 3 under CPEC. Meanwhile, Port Qasim Electric Power Company faced maintenance.",
     "Wind additions in the Gharo–Jhimpir Wind Corridor continue, including projects like FWEL I and FWEL II by Fauji Foundation."
